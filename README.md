@@ -6,69 +6,107 @@
 [![Streamlit](https://img.shields.io/badge/Frontend-Streamlit-red.svg)](https://streamlit.io/)
 [![License](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
 
-An agentic, multi-node research platform powered by **LangGraph**, **FastAPI**, and **Streamlit**. The system dynamically formulates research plans, executes deep web retrieval, synthesizes structured technical reports with real-time token streaming, and verifies claims using a automated fact-checking guardrail.
+An agentic, multi-node research platform powered by LangGraph, FastAPI, and Streamlit. The system plans research tasks, retrieves web sources, synthesizes structured technical reports, streams updates live in the UI, and verifies claims through a built-in fact-checking guardrail.
 
----
+## ✨ Key Features
 
-## 💡 Key Architectural Features
+- ⚡ Real-time token streaming for live draft generation
+- ✋ Human-in-the-loop review before web retrieval begins
+- 🔄 Stateful workflow orchestration with checkpointing and resume support
+- 🛡️ Automated fact-verification for generated claims
+- 📥 Markdown and Word export for finished research reports
+- 💬 Post-generation chat over gathered sources
 
-- **⚡ Real-Time SSE Token Streaming**: Low-latency Server-Sent Events (SSE) stream generation tokens dynamically from local/cloud LLM endpoints to the Streamlit UI.
-- **✋ Human-in-the-Loop (HITL) Orchestration**: State graph persistence allows human approval and editing of AI research plans mid-flight before web queries are executed.
-- **🔄 Fault-Tolerant State Machine**: Built on LangGraph state charts with SQLite checkpointers, allowing full session restoration, history tracking, and conditional retry loops.
-- **🛡️ Fact-Verification Guardrail**: Automated evaluation node checks synthesized claims against retrieved web snippets and triggers dynamic synthesis retries upon failure.
-- **📥 Deep-Dive Export Suite**: Generates formatted, production-ready research reports in standard `.md` (Markdown) and `.docx` (Microsoft Word) formats.
-- **💬 Interactive Report RAG**: Memory-backed chat interface allowing users to query gathered source contexts for post-synthesis exploration.
-
----
-
-## 🏗️ System Architecture
+## 🏗️ Architecture
 
 ```mermaid
 graph TD
-    Start([User Query]) --> Planner[🧠 Planner Node]
-    Planner --> AutoApprove{Auto Approve?}
-    
-    AutoApprove -- No --> HumanReview[✋ Human-in-the-Loop Review]
-    HumanReview -- Plan Approved --> Retriever[🌐 Web Retriever Node]
-    AutoApprove -- Yes --> Retriever
-    
-    Retriever --> Synthesizer[✍️ Synthesizer Node]
-    Synthesizer --> FactChecker[✅ Fact Checker Guardrail]
-    
-    FactChecker -- Verification Failed & Retries < 1 --> Synthesizer
-    FactChecker -- Verified / Max Retries --> Finished([📝 Final Report & Export])
+    A[User Query] --> B[Planner Node]
+    B --> C{Auto Approve?}
+    C -- No --> D[Human Review]
+    C -- Yes --> E[Retriever Node]
+    D --> E
+    E --> F[Synthesizer Node]
+    F --> G[Fact Checker]
+    G -- Failed --> F
+    G -- Verified --> H[Final Report & Export]
+```
 
-    🛠️ Tech Stack
-    Category,Technology,Purpose
-Agent Framework,LangGraph / LangChain,"State Graph orchestration, structured outputs, HITL checkpoints"
-Backend API,FastAPI / Uvicorn,Asynchronous REST backend with Server-Sent Events (SSE)
-Frontend UI,Streamlit,"Interactive UI, session persistence, document rendering"
-LLM Engine,LM Studio / OpenAI-Compatible,Local or cloud LLM inference (qwen2.5-7b-instruct)
-Document Processing,python-docx,Programmatic Microsoft Word compilation
-State Persistence,AsyncSqliteSaver,Asynchronous session checkpointer for graph resume
+## 🛠️ Tech Stack
 
-🚀 Quickstart Guide
-Prerequisites
-Python 3.10+
+- Agent Framework: LangGraph / LangChain
+- Backend API: FastAPI / Uvicorn
+- Frontend UI: Streamlit
+- LLM Engine: LM Studio or any OpenAI-compatible endpoint
+- Document Export: python-docx
+- State Persistence: AsyncSqliteSaver
 
-LM Studio running locally (or any OpenAI-compatible API key) with qwen2.5-7b-instruct or similar.
+## 🚀 Quickstart
 
-1. Repository Setup
-git clone [https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git](https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git)
+### Prerequisites
+
+- Python 3.10+
+- A local LLM endpoint such as LM Studio running at an OpenAI-compatible API URL
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git
 cd YOUR_REPO_NAME
+```
 
-2. Environment Setup
+### 2. Create and activate a virtual environment
+
+```bash
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate
+# On Windows: venv\Scripts\activate
+```
+
+### 3. Install dependencies
+
+```bash
 pip install -r requirements.txt
-3. Launch Services
-Terminal 1 — Backend (FastAPI):
+```
+
+### 4. Run the backend and frontend
+
+Open two terminals.
+
+Terminal 1 — Backend:
+
+```bash
 uvicorn main:app --reload --port 8000
-Terminal 2 — Frontend (Streamlit):
+```
+
+Terminal 2 — Frontend:
+
+```bash
 streamlit run app.py
-Open your browser to http://localhost:8501 to access the workspace.
-📋 API Reference
-Endpoint,Method,Description
-/research/stream,POST,Initializes agent execution and streams node events/tokens via SSE
-/research/resume,POST,Resumes paused graph execution after Human-in-the-Loop plan approval
-/research/chat,POST,Streams contextual Q&A answers against stored session research
+```
+
+Then open http://localhost:8501 in your browser.
+
+## 📡 API Endpoints
+
+- POST /research/stream — Start research and stream node updates and tokens
+- POST /research/resume — Resume a paused workflow after plan approval
+- POST /research/chat — Ask follow-up questions using gathered research context
+
+## 📁 Project Structure
+
+```text
+.
+├── app.py            # Streamlit frontend
+├── graph.py          # LangGraph workflow and agent nodes
+├── main.py           # FastAPI backend
+├── schemas.py        # Pydantic models
+├── tools.py          # Search and retrieval helpers
+├── prompt.txt        # Prompt template
+├── requirements.txt  # Python dependencies
+└── README.md         # Project documentation
+```
+
+## 📄 License
+
+This project is licensed under the MIT License. See the LICENSE file for details.
