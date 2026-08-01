@@ -1,3 +1,6 @@
+# Import AsyncSqliteSaver instead of SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+import aiosqlite
 from typing import List, Optional, TypedDict
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -61,7 +64,6 @@ async def retriever_node(state: AgentState) -> AgentState:
     if not plan:
         return {**state, "sources": [], "status": "no_plan"}
 
-    # Increase query limit from 2 to 4 to cover more sub-topics
     queries = (plan.questions or [plan.topic])[:4]
     sources = execute_web_search(queries, max_results_per_query=2, deep_scrape=True)
     print(f"Retriever found {len(sources)} sources.")
@@ -79,10 +81,8 @@ async def synthesizer_node(state: AgentState) -> AgentState:
     if not plan:
         return {**state, "draft": None, "status": "no_plan"}
 
-    # Increase context window size per source from 200 to 1,500 characters
     formatted_sources = []
     for idx, s in enumerate(sources[:5], 1):
-        # Pass up to 1,500 characters per source into context
         content_snippet = s.snippet[:1500] if s.snippet else "No content available."
         formatted_sources.append(f"Source {idx} [{s.title}]:\n{content_snippet}\n")
 
@@ -139,7 +139,6 @@ async def fact_checker_node(state: AgentState) -> AgentState:
         print(f"Fact checker fallback: {e}")
         result = FactCheckResult(status="verified", details="Auto-verified via fallback.")
 
-    # Normalize status string (e.g. "Supported", "Passed", "Verified" -> "verified")
     raw_status = str(getattr(result, "status", "verified")).lower()
     normalized_status = "verified" if any(kw in raw_status for kw in ["verified", "supported", "passed", "high"]) else "failed"
 
@@ -159,7 +158,6 @@ def route_after_fact_check(state: AgentState) -> str:
     retry_count = state.get("retry_count", 0)
     current_status = state.get("status", "verified")
 
-    # Exit if fact-check passes OR if max retries (1) reached
     if current_status == "verified" or retry_count >= 1:
         print("Fact check passed or max retries reached. Finishing workflow.")
         return END
@@ -189,6 +187,8 @@ workflow.add_conditional_edges(
     },
 )
 
-research_graph = workflow.compile()
+# Function to compile graph asynchronously within FastAPI context
+def get_research_graph(checkpointer):
+    return workflow.compile(checkpointer=checkpointer)
 
-__all__ = ["research_graph", "AgentState"]
+__all__ = ["workflow", "get_research_graph", "AgentState"]

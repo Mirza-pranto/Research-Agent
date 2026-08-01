@@ -1,20 +1,58 @@
 import json
+import uuid
 import httpx
 import streamlit as st
 
-st.set_page_config(page_title="AI Research Dashboard", layout="wide")
+st.set_page_config(page_title="AI Research Workspace", layout="wide")
 
-st.title("Free AI Research Agent")
-st.write("Submit a research prompt to run the local FastAPI workflow with real-time step streaming.")
+# Initialize session state for multi-thread history
+if "sessions" not in st.session_state:
+    st.session_state.sessions = {}  # {thread_id: {"topic": ..., "data": ...}}
 
-prompt = st.text_area("Research prompt", placeholder="Enter a topic or question...")
+if "active_thread_id" not in st.session_state:
+    st.session_state.active_thread_id = str(uuid.uuid4())
 
-if st.button("Run research") and prompt.strip():
-    # Progress status container for streaming steps
+active_thread = st.session_state.active_thread_id
+current_session_data = st.session_state.sessions.get(active_thread, {})
+
+# Sidebar Navigation for Research Sessions
+with st.sidebar:
+    st.title("📚 Research History")
+
+    if st.button("➕ New Research Session", use_container_width=True):
+        st.session_state.active_thread_id = str(uuid.uuid4())
+        st.rerun()
+
+    st.divider()
+
+    if st.session_state.sessions:
+        st.write("**Saved Sessions:**")
+        for tid, sess in st.session_state.sessions.items():
+            topic_label = sess.get("topic", "Untitled Session")
+            truncated_label = topic_label[:26] + ("..." if len(topic_label) > 26 else "")
+
+            # Highlight currently active session
+            is_active = (tid == st.session_state.active_thread_id)
+            btn_prefix = "🟢 " if is_active else "📄 "
+
+            if st.button(f"{btn_prefix}{truncated_label}", key=f"btn_{tid}", use_container_width=True):
+                st.session_state.active_thread_id = tid
+                st.rerun()
+    else:
+        st.caption("No past sessions yet. Submit a research topic to start!")
+
+st.title("Free AI Research Agent Workspace 3.0")
+st.write("Submit a research prompt to run the local FastAPI workflow with real-time streaming and thread memory.")
+
+# Pre-fill input box if active session already has a topic
+default_prompt = current_session_data.get("topic", "")
+prompt = st.text_area("Research prompt", value=default_prompt, placeholder="Enter a topic or question...", key=f"prompt_{active_thread}")
+
+if st.button("Run research", key=f"run_{active_thread}") and prompt.strip():
     status_box = st.status("🚀 Initializing research workflow...", expanded=True)
 
-    # Dictionary to hold the aggregated state from SSE events
     final_data = {
+        "topic": prompt.strip(),
         "plan": None,
         "sources": [],
         "draft": None,
@@ -24,9 +62,12 @@ if st.button("Run research") and prompt.strip():
 
     try:
         url = "http://localhost:8000/research/stream"
-        
-        # Use httpx to consume Server-Sent Events (SSE)
-        with httpx.stream("POST", url, json={"topic": prompt.strip()}, timeout=600.0) as response:
+        payload = {
+            "topic": prompt.strip(),
+            "thread_id": active_thread,
+        }
+
+        with httpx.stream("POST", url, json=payload, timeout=600.0) as response:
             response.raise_for_status()
 
             for line in response.iter_lines():
@@ -70,11 +111,16 @@ if st.button("Run research") and prompt.strip():
         status_box.update(label="❌ Connection failed", state="error")
         st.error(f"Failed to connect to streaming backend: {err}")
 
-    # Render Final Results Section
+    # Store full research session in Streamlit state
+    st.session_state.sessions[active_thread] = final_data
+    current_session_data = final_data
+
+# Render Active Session Results if present
+if current_session_data and current_session_data.get("status") in ["completed", "verified", "drafted"]:
     st.divider()
 
     st.subheader("Summary")
-    draft = final_data.get("draft") or {}
+    draft = current_session_data.get("draft") or {}
     st.write(draft.get("summary") or "No summary available yet.")
 
     st.subheader("Key takeaways")
@@ -86,7 +132,7 @@ if st.button("Run research") and prompt.strip():
         st.info("No key takeaways returned.")
 
     st.subheader("Fact check status")
-    fact_checks = final_data.get("fact_checks") or []
+    fact_checks = current_session_data.get("fact_checks") or []
     if fact_checks:
         for check in fact_checks:
             claim = check.get("claim") or check.get("details") or "N/A"
@@ -96,10 +142,10 @@ if st.button("Run research") and prompt.strip():
         st.info("No fact-check results available.")
 
     st.subheader("Revision count / Status")
-    st.write(final_data.get("status") or "unknown")
+    st.write(current_session_data.get("status") or "unknown")
 
     st.subheader("Sources")
-    sources = final_data.get("sources") or []
+    sources = current_session_data.get("sources") or []
     if sources:
         for source in sources:
             title = source.get("title") or "Untitled"
@@ -110,6 +156,6 @@ if st.button("Run research") and prompt.strip():
             else:
                 st.markdown(f"- {title}")
             if snippet:
-                st.caption(snippet[:250] + "..." if len(snippet) > 250 else snippet)
+                st.caption(snippet[:300] + "..." if len(snippet) > 300 else snippet)
     else:
         st.info("No sources returned.")

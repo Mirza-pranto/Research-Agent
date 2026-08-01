@@ -1,16 +1,32 @@
 import json
-from typing import Dict, List, Optional, Any
+from contextlib import asynccontextmanager
+from typing import Any, Dict, List, Optional
+from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from graph import research_graph
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from graph import workflow, get_research_graph
+
+# Global reference for initialized graph
+research_graph = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global research_graph
+    # Connect asynchronously to SQLite database on startup
+    async with AsyncSqliteSaver.from_conn_string("research_memory.db") as checkpointer:
+        research_graph = get_research_graph(checkpointer)
+        print("--- [DATABASE] AsyncSqliteSaver Checkpointer active ---")
+        yield
 
 app = FastAPI(
     title="Free AI Research Agent API",
-    description="Backend API powering the LangGraph multi-agent research workflow.",
-    version="2.0.0",
+    description="Backend API powering the LangGraph multi-agent research workflow with persistent thread memory.",
+    version="3.0.0",
+    lifespan=lifespan,
 )
 
 # Enable CORS so Streamlit or external dashboards can communicate seamlessly
@@ -23,21 +39,20 @@ app.add_middleware(
 )
 
 
-# Request schema (Supports both 'topic' and 'query' to avoid payload mismatches)
 class ResearchRequest(BaseModel):
     topic: Optional[str] = None
     query: Optional[str] = None
+    thread_id: Optional[str] = None
 
     def get_search_topic(self) -> str:
-        """Utility to pull whichever field Streamlit sent."""
         search_term = self.topic or self.query
         if not search_term or not search_term.strip():
             raise ValueError("Research topic/query cannot be empty.")
         return search_term.strip()
 
 
-# Response schema
 class ResearchResponse(BaseModel):
+    thread_id: str
     topic: str
     plan: Optional[Dict[str, Any]] = None
     sources: List[Dict[str, Any]] = Field(default_factory=list)
@@ -47,7 +62,6 @@ class ResearchResponse(BaseModel):
 
 
 def _dump_object(obj: Any) -> Any:
-    """Helper function to convert Pydantic objects or dicts into standard dicts."""
     if obj is None:
         return None
     if hasattr(obj, "model_dump"):
@@ -61,70 +75,21 @@ def _dump_object(obj: Any) -> Any:
 
 @app.get("/")
 def read_root():
-    """Health check endpoint."""
     return {
         "status": "online",
-        "message": "AI Research Agent API is running. POST to /research or /research/stream to start a job.",
+        "message": "AI Research Agent API is running with Async SQLite persistence.",
     }
-
-
-@app.post("/research", response_model=ResearchResponse)
-def run_research(request: ResearchRequest) -> ResearchResponse:
-    """Synchronous research endpoint (Wait for full completion)."""
-    try:
-        topic = request.get_search_topic()
-    except ValueError as err:
-        raise HTTPException(status_code=400, detail=str(err))
-
-    # Construct initial state payload for LangGraph
-    initial_state = {
-        "topic": topic,
-        "query": topic,
-        "plan": None,
-        "sources": [],
-        "draft": None,
-        "fact_checks": [],
-        "retry_count": 0,
-        "status": "started",
-    }
-
-    try:
-        # Run state graph
-        result = research_graph.invoke(initial_state)
-
-        # Convert state items safely to dicts
-        plan_data = _dump_object(result.get("plan"))
-        draft_data = _dump_object(result.get("draft"))
-
-        raw_sources = result.get("sources", [])
-        sources_data = [_dump_object(src) for src in raw_sources]
-
-        raw_fact_checks = result.get("fact_checks", [])
-        fact_checks_data = [_dump_object(fc) for fc in raw_fact_checks]
-
-        return ResearchResponse(
-            topic=topic,
-            plan=plan_data,
-            sources=sources_data,
-            draft=draft_data,
-            fact_checks=fact_checks_data,
-            status=result.get("status", "completed"),
-        )
-
-    except Exception as e:
-        print(f"Error executing research graph: {str(e)}")
-        raise HTTPException(
-            status_code=500, detail=f"Internal Agent Graph Error: {str(e)}"
-        )
 
 
 @app.post("/research/stream")
 async def stream_research(request: ResearchRequest):
-    """Real-time SSE endpoint streaming node updates as they complete."""
     try:
         topic = request.get_search_topic()
     except ValueError as err:
         raise HTTPException(status_code=400, detail=str(err))
+
+    thread_id = request.thread_id or str(uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
 
     initial_state = {
         "topic": topic,
@@ -139,10 +104,10 @@ async def stream_research(request: ResearchRequest):
 
     async def event_generator():
         try:
-            # Stream graph updates node-by-node using LangGraph's .astream()
-            async for chunk in research_graph.astream(initial_state, stream_mode="updates"):
+            async for chunk in research_graph.astream(initial_state, config=config, stream_mode="updates"):
                 for node_name, node_state in chunk.items():
                     event_payload = {
+                        "thread_id": thread_id,
                         "node": node_name,
                         "status": node_state.get("status", "processing"),
                         "plan": _dump_object(node_state.get("plan")),
@@ -150,10 +115,9 @@ async def stream_research(request: ResearchRequest):
                         "draft": _dump_object(node_state.get("draft")),
                         "fact_checks": [_dump_object(fc) for fc in node_state.get("fact_checks", [])],
                     }
-                    # Send payload formatted as Server-Sent Event (SSE)
                     yield f"data: {json.dumps(event_payload)}\n\n"
         except Exception as e:
-            error_payload = {"node": "error", "message": str(e)}
+            error_payload = {"thread_id": thread_id, "node": "error", "message": str(e)}
             yield f"data: {json.dumps(error_payload)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
