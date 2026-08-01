@@ -2,6 +2,8 @@ import json
 import uuid
 import httpx
 import streamlit as st
+import io
+from docx import Document
 
 st.set_page_config(page_title="AI Research Workspace", layout="wide")
 
@@ -11,7 +13,7 @@ if "active_thread_id" not in st.session_state: st.session_state.active_thread_id
 active_thread = st.session_state.active_thread_id
 current_session_data = st.session_state.sessions.get(active_thread, {})
 
-# (Keep your sidebar logic here exactly as it was)
+# Sidebar logic
 with st.sidebar:
     st.title("📚 Research History")
     if st.button("➕ New Research Session", use_container_width=True):
@@ -34,7 +36,35 @@ default_prompt = current_session_data.get("topic", "")
 prompt = st.text_area("Research prompt", value=default_prompt, placeholder="Enter a topic...", key=f"prompt_{active_thread}")
 auto_approve = st.toggle("Auto-approve research plan", value=True)
 
-# UPGRADE: We now pass a streaming_placeholder to write tokens to the screen
+# Helper function to generate Word Document
+def generate_word_document(markdown_text: str) -> bytes:
+    doc = Document()
+    doc.add_heading('Research Report', 0)
+    
+    for line in markdown_text.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Map markdown to Word styles
+        if line.startswith('# '):
+            doc.add_heading(line.replace('# ', '').strip(), level=1)
+        elif line.startswith('## '):
+            doc.add_heading(line.replace('## ', '').strip(), level=2)
+        elif line.startswith('### '):
+            doc.add_heading(line.replace('### ', '').strip(), level=3)
+        elif line.startswith('- ') or line.startswith('* '):
+            doc.add_paragraph(line[2:].strip(), style='List Bullet')
+        else:
+            # Remove bold/italic markdown asterisks for cleaner Word text
+            clean_line = line.replace('**', '').replace('*', '')
+            doc.add_paragraph(clean_line)
+            
+    bio = io.BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
+
+# Stream consumer function
 def consume_stream(url: str, payload: dict, final_data: dict, status_box, streaming_placeholder=None):
     has_error = False
     accumulated_draft = ""
@@ -125,18 +155,46 @@ if current_session_data.get("status") == "planned":
             if not has_error: st.rerun()
 
 # ==========================================
-# COMPLETED STATE: Display Draft & Chat
+# COMPLETED STATE: Display Draft & Chat & Export
 # ==========================================
 if current_session_data and current_session_data.get("status") in ["completed", "verified", "drafted"]:
     st.divider()
     
     # 1. Display the Final Streamed Draft
     st.subheader("📝 Final Research Draft")
-    st.markdown(current_session_data.get("draft") or "No draft generated.")
+    draft_text = current_session_data.get("draft") or "No draft generated."
+    st.markdown(draft_text)
     
     with st.expander("View Reference Sources"):
         for source in current_session_data.get("sources", []):
             st.markdown(f"- **{source.get('title', 'Unknown')}**: {source.get('url', '')}")
+
+    st.divider()
+    
+    # ==========================================
+    # UPGRADE: Deep-Dive Exporting UI
+    # ==========================================
+    st.subheader("📥 Export Report")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.download_button(
+            label="📄 Download as Markdown",
+            data=draft_text,
+            file_name=f"Research_Report_{active_thread[:8]}.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
+        
+    with col2:
+        word_file = generate_word_document(draft_text)
+        st.download_button(
+            label="📝 Download as Word (.docx)",
+            data=word_file,
+            file_name=f"Research_Report_{active_thread[:8]}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True
+        )
 
     st.divider()
 
