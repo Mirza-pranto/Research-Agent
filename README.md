@@ -37,3 +37,38 @@ graph TD
     
     FactChecker -- Verification Failed & Retries < 1 --> Synthesizer
     FactChecker -- Verified / Max Retries --> Finished([📝 Final Report & Export])
+
+    🛠️ Tech Stack
+    Category,Technology,Purpose
+Agent Framework,LangGraph / LangChain,"State Graph orchestration, structured outputs, HITL checkpoints"
+Backend API,FastAPI / Uvicorn,Asynchronous REST backend with Server-Sent Events (SSE)
+Frontend UI,Streamlit,"Interactive UI, session persistence, document rendering"
+LLM Engine,LM Studio / OpenAI-Compatible,Local or cloud LLM inference (qwen2.5-7b-instruct)
+Document Processing,python-docx,Programmatic Microsoft Word compilation
+State Persistence,AsyncSqliteSaver,Asynchronous session checkpointer for graph resume
+
+🚀 Quickstart Guide
+Prerequisites
+Python 3.10+
+
+LM Studio running locally (or any OpenAI-compatible API key) with qwen2.5-7b-instruct or similar.
+
+1. Repository Setup
+git clone [https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git](https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git)
+cd YOUR_REPO_NAME
+
+2. Environment Setup
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install -r requirements.txt
+3. Launch Services
+Terminal 1 — Backend (FastAPI):
+uvicorn main:app --reload --port 8000
+Terminal 2 — Frontend (Streamlit):
+streamlit run app.py
+Open your browser to http://localhost:8501 to access the workspace.
+📋 API Reference
+Endpoint,Method,Description
+/research/stream,POST,Initializes agent execution and streams node events/tokens via SSE
+/research/resume,POST,Resumes paused graph execution after Human-in-the-Loop plan approval
+/research/chat,POST,Streams contextual Q&A answers against stored session research

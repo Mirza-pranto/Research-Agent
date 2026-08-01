@@ -1,0 +1,8 @@
+🛠️ Tech StackCategoryTechnologyPurposeAgent FrameworkLangGraph / LangChainState Graph orchestration, structured outputs, HITL checkpointsBackend APIFastAPI / UvicornAsynchronous REST backend with Server-Sent Events (SSE)Frontend UIStreamlitInteractive UI, session persistence, document renderingLLM EngineLM Studio / OpenAI-CompatibleLocal or cloud LLM inference (qwen2.5-7b-instruct)Document Processingpython-docxProgrammatic Microsoft Word compilationState PersistenceAsyncSqliteSaverAsynchronous session checkpointer for graph resume🚀 Quickstart GuidePrerequisitesPython 3.10+LM Studio running locally (or any OpenAI-compatible API key) with qwen2.5-7b-instruct or similar.1. Repository SetupBashgit clone [https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git](https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git)
+cd YOUR_REPO_NAME
+2. Environment SetupBashpython -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install -r requirements.txt
+3. Launch ServicesTerminal 1 — Backend (FastAPI):Bashuvicorn main:app --reload --port 8000
+Terminal 2 — Frontend (Streamlit):Bashstreamlit run app.py
+Open your browser to http://localhost:8501 to access the workspace.📋 API ReferenceEndpointMethodDescription/research/streamPOSTInitializes agent execution and streams node events/tokens via SSE/research/resumePOSTResumes paused graph execution after Human-in-the-Loop plan approval/research/chatPOSTStreams contextual Q&A answers against stored session research
