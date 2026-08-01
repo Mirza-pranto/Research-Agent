@@ -91,16 +91,17 @@ async def synthesizer_node(state: AgentState) -> AgentState:
     raw_plan = state.get("plan")
     sources = state.get("sources", [])
     if not raw_plan:
-        return {**state, "draft": None, "status": "no_plan"}
+        return {**state, "draft": "No plan available.", "status": "no_plan"}
 
-    # FIX: Ensure plan is a Pydantic object
-    from schemas import ResearchPlan
-    plan = _coerce_model(raw_plan, ResearchPlan)
+    # Defensively unwrap tuple if needed
+    if isinstance(raw_plan, tuple):
+        raw_plan = raw_plan[0]
 
     formatted_sources = []
     for idx, s in enumerate(sources[:5], 1):
-        content_snippet = s.snippet[:1500] if s.snippet else "No content available."
-        formatted_sources.append(f"Source {idx} [{s.title}]:\n{content_snippet}\n")
+        content_snippet = s.snippet[:1500] if hasattr(s, "snippet") and s.snippet else s.get("snippet", "No content")[:1500]
+        title = s.title if hasattr(s, "title") else s.get("title", "Untitled")
+        formatted_sources.append(f"Source {idx} [{title}]:\n{content_snippet}\n")
 
     sources_summary = "\n---\n".join(formatted_sources) if formatted_sources else "No sources available."
 
@@ -109,25 +110,25 @@ async def synthesizer_node(state: AgentState) -> AgentState:
             content=(
                 "You are an expert technical researcher. Synthesize a detailed, thorough research report "
                 "addressing all research questions using the provided source context. "
-                "Provide detailed explanations, technical insights, and key takeaways."
+                "Write in clean, well-structured Markdown. Include a 'Summary' section and a 'Key Takeaways' bulleted list."
             )
         ),
         HumanMessage(
             content=(
-                f"Topic: {plan.topic}\n\n"
-                f"Target Questions:\n" + "\n".join([f"- {q}" for q in plan.questions]) + "\n\n"
+                f"Topic: {raw_plan.get('topic', 'Unknown')}\n\n"
                 f"Gathered Research Data:\n{sources_summary}"
             )
         ),
     ]
 
     try:
-        structured_llm = llm.with_structured_output(ResearchDraft)
-        response = await structured_llm.ainvoke(prompt)
-        draft = _coerce_model(response, ResearchDraft)
+        # Notice we removed .with_structured_output()! 
+        # By streaming standard text, LangGraph will catch the tokens and forward them to our SSE stream.
+        response = await llm.ainvoke(prompt)
+        draft = response.content
     except Exception as e:
         print(f"Synthesizer fallback due to error: {e}")
-        draft = ResearchDraft(summary=f"Summary of research on {plan.topic} based on gathered sources.")
+        draft = f"Failed to generate draft due to an error: {str(e)}"
 
     return {
         **state,
