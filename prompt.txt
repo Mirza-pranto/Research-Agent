@@ -1,0 +1,5 @@
+Compare Qwen 3.6, GLM-5.2, and DeepSeek V4 Pro for local agentic workflows in 2026. Highlight their context window sizes, licenses, and primary strength areas.
+
+Provide a technical comparison between LangGraph 1.0, CrewAI, and the Microsoft Agent Framework in 2026. Focus on state persistence, Model Context Protocol (MCP) support, token usage efficiency, and when a developer should choose one over the others.
+
+Analyze the current state of local LLM fine-tuning techniques (such as PEFT and Unsloth LoRA) for small models under 10B parameters. How do they perform when fine-tuned specifically for tool-calling and structured JSON generation in multi-agent systems?
