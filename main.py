@@ -1,6 +1,8 @@
+import json
 from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from graph import research_graph
@@ -8,7 +10,7 @@ from graph import research_graph
 app = FastAPI(
     title="Free AI Research Agent API",
     description="Backend API powering the LangGraph multi-agent research workflow.",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 # Enable CORS so Streamlit or external dashboards can communicate seamlessly
@@ -62,19 +64,19 @@ def read_root():
     """Health check endpoint."""
     return {
         "status": "online",
-        "message": "AI Research Agent API is running. POST to /research to start a job.",
+        "message": "AI Research Agent API is running. POST to /research or /research/stream to start a job.",
     }
 
 
 @app.post("/research", response_model=ResearchResponse)
 def run_research(request: ResearchRequest) -> ResearchResponse:
-    """Main research endpoint invoked by Streamlit."""
+    """Synchronous research endpoint (Wait for full completion)."""
     try:
         topic = request.get_search_topic()
     except ValueError as err:
         raise HTTPException(status_code=400, detail=str(err))
 
-    # Construct state payload for LangGraph
+    # Construct initial state payload for LangGraph
     initial_state = {
         "topic": topic,
         "query": topic,
@@ -90,7 +92,7 @@ def run_research(request: ResearchRequest) -> ResearchResponse:
         # Run state graph
         result = research_graph.invoke(initial_state)
 
-        # Convert Pydantic state items safely to dicts
+        # Convert state items safely to dicts
         plan_data = _dump_object(result.get("plan"))
         draft_data = _dump_object(result.get("draft"))
 
@@ -114,3 +116,44 @@ def run_research(request: ResearchRequest) -> ResearchResponse:
         raise HTTPException(
             status_code=500, detail=f"Internal Agent Graph Error: {str(e)}"
         )
+
+
+@app.post("/research/stream")
+async def stream_research(request: ResearchRequest):
+    """Real-time SSE endpoint streaming node updates as they complete."""
+    try:
+        topic = request.get_search_topic()
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+
+    initial_state = {
+        "topic": topic,
+        "query": topic,
+        "plan": None,
+        "sources": [],
+        "draft": None,
+        "fact_checks": [],
+        "retry_count": 0,
+        "status": "started",
+    }
+
+    async def event_generator():
+        try:
+            # Stream graph updates node-by-node using LangGraph's .astream()
+            async for chunk in research_graph.astream(initial_state, stream_mode="updates"):
+                for node_name, node_state in chunk.items():
+                    event_payload = {
+                        "node": node_name,
+                        "status": node_state.get("status", "processing"),
+                        "plan": _dump_object(node_state.get("plan")),
+                        "sources": [_dump_object(s) for s in node_state.get("sources", [])],
+                        "draft": _dump_object(node_state.get("draft")),
+                        "fact_checks": [_dump_object(fc) for fc in node_state.get("fact_checks", [])],
+                    }
+                    # Send payload formatted as Server-Sent Event (SSE)
+                    yield f"data: {json.dumps(event_payload)}\n\n"
+        except Exception as e:
+            error_payload = {"node": "error", "message": str(e)}
+            yield f"data: {json.dumps(error_payload)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

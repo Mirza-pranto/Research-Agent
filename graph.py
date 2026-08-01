@@ -17,12 +17,12 @@ class AgentState(TypedDict):
     status: str
 
 
-# Point LangChain to your LM Studio local server!
+# Point LangChain to your local LM Studio endpoint
 llm = ChatOpenAI(
     base_url="http://localhost:1234/v1",  # Local LM Studio endpoint
-    api_key="lm-studio",                   # Put any non-empty string here
-    model="qwen2.5-7b-instruct",           # Match the model ID running in LM Studio
-    temperature=0.1
+    api_key="lm-studio",                  # Non-empty string key
+    model="qwen2.5-7b-instruct",          # Model ID running in LM Studio
+    temperature=0.1,
 )
 
 
@@ -34,7 +34,7 @@ def _coerce_model(obj, model_class):
     return model_class.model_validate(obj)
 
 
-def planner_node(state: AgentState) -> AgentState:
+async def planner_node(state: AgentState) -> AgentState:
     print(f"--- [NODE: PLANNER] Generating research plan for topic: '{state['topic']}' ---")
     prompt = [
         SystemMessage(content="Create a concise research plan for the requested topic. Keep questions short and actionable."),
@@ -42,7 +42,8 @@ def planner_node(state: AgentState) -> AgentState:
     ]
     try:
         structured_llm = llm.with_structured_output(ResearchPlan)
-        plan = _coerce_model(structured_llm.invoke(prompt), ResearchPlan)
+        response = await structured_llm.ainvoke(prompt)
+        plan = _coerce_model(response, ResearchPlan)
     except Exception as e:
         print(f"Planner structured output fallback: {e}")
         plan = ResearchPlan(topic=state["topic"], objective="Research topic", questions=[state["topic"]])
@@ -54,15 +55,15 @@ def planner_node(state: AgentState) -> AgentState:
     }
 
 
-def retriever_node(state: AgentState) -> AgentState:
+async def retriever_node(state: AgentState) -> AgentState:
     print("--- [NODE: RETRIEVER] Fetching web sources ---")
     plan = state.get("plan")
     if not plan:
         return {**state, "sources": [], "status": "no_plan"}
 
-    # Limit search queries to 2 max to ensure fast execution
-    queries = (plan.questions or [plan.topic])[:2]
-    sources = execute_web_search(queries)
+    # Increase query limit from 2 to 4 to cover more sub-topics
+    queries = (plan.questions or [plan.topic])[:4]
+    sources = execute_web_search(queries, max_results_per_query=2, deep_scrape=True)
     print(f"Retriever found {len(sources)} sources.")
     return {
         **state,
@@ -71,29 +72,43 @@ def retriever_node(state: AgentState) -> AgentState:
     }
 
 
-def synthesizer_node(state: AgentState) -> AgentState:
+async def synthesizer_node(state: AgentState) -> AgentState:
     print(f"--- [NODE: SYNTHESIZER] Writing draft (Attempt {state.get('retry_count', 0) + 1}) ---")
     plan = state.get("plan")
     sources = state.get("sources", [])
     if not plan:
         return {**state, "draft": None, "status": "no_plan"}
 
-    sources_summary = "\n".join([f"- {s.title}: {s.snippet[:200]}" for s in sources[:3]]) if sources else "No sources available."
+    # Increase context window size per source from 200 to 1,500 characters
+    formatted_sources = []
+    for idx, s in enumerate(sources[:5], 1):
+        # Pass up to 1,500 characters per source into context
+        content_snippet = s.snippet[:1500] if s.snippet else "No content available."
+        formatted_sources.append(f"Source {idx} [{s.title}]:\n{content_snippet}\n")
+
+    sources_summary = "\n---\n".join(formatted_sources) if formatted_sources else "No sources available."
 
     prompt = [
-        SystemMessage(content="Synthesize the research findings into a concise draft containing a clear content summary."),
+        SystemMessage(
+            content=(
+                "You are an expert technical researcher. Synthesize a detailed, thorough research report "
+                "addressing all research questions using the provided source context. "
+                "Provide detailed explanations, technical insights, and key takeaways."
+            )
+        ),
         HumanMessage(
             content=(
-                f"Topic: {plan.topic}\n"
-                f"Objective: {plan.objective}\n"
-                f"Key Research Data:\n{sources_summary}"
+                f"Topic: {plan.topic}\n\n"
+                f"Target Questions:\n" + "\n".join([f"- {q}" for q in plan.questions]) + "\n\n"
+                f"Gathered Research Data:\n{sources_summary}"
             )
         ),
     ]
-    
+
     try:
         structured_llm = llm.with_structured_output(ResearchDraft)
-        draft = _coerce_model(structured_llm.invoke(prompt), ResearchDraft)
+        response = await structured_llm.ainvoke(prompt)
+        draft = _coerce_model(response, ResearchDraft)
     except Exception as e:
         print(f"Synthesizer fallback due to error: {e}")
         draft = ResearchDraft(summary=f"Summary of research on {plan.topic} based on gathered sources.")
@@ -105,7 +120,7 @@ def synthesizer_node(state: AgentState) -> AgentState:
     }
 
 
-def fact_checker_node(state: AgentState) -> AgentState:
+async def fact_checker_node(state: AgentState) -> AgentState:
     print("--- [NODE: FACT CHECKER] Verifying claims ---")
     draft = state.get("draft")
     if not draft:
@@ -115,10 +130,11 @@ def fact_checker_node(state: AgentState) -> AgentState:
         SystemMessage(content="Check whether the draft claims are supported. Return status as 'verified' or 'failed'."),
         HumanMessage(content=f"Draft summary: {draft.summary}"),
     ]
-    
+
     try:
         structured_llm = llm.with_structured_output(FactCheckResult)
-        result = _coerce_model(structured_llm.invoke(prompt), FactCheckResult)
+        response = await structured_llm.ainvoke(prompt)
+        result = _coerce_model(response, FactCheckResult)
     except Exception as e:
         print(f"Fact checker fallback: {e}")
         result = FactCheckResult(status="verified", details="Auto-verified via fallback.")
@@ -150,6 +166,7 @@ def route_after_fact_check(state: AgentState) -> str:
 
     print(f"Fact check failed with status '{current_status}'. Retrying synthesis...")
     return "synthesizer"
+
 
 # Define StateGraph
 workflow = StateGraph(AgentState)
