@@ -1,4 +1,3 @@
-# Import AsyncSqliteSaver instead of SqliteSaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 import aiosqlite
 from typing import List, Optional, TypedDict
@@ -12,6 +11,7 @@ from tools import execute_web_search
 
 class AgentState(TypedDict):
     topic: str
+    auto_approve: bool  # NEW: Tracks if we should skip the HITL pause
     plan: Optional[ResearchPlan]
     sources: List[ExtractedSource]
     draft: Optional[ResearchDraft]
@@ -22,12 +22,11 @@ class AgentState(TypedDict):
 
 # Point LangChain to your local LM Studio endpoint
 llm = ChatOpenAI(
-    base_url="http://localhost:1234/v1",  # Local LM Studio endpoint
-    api_key="lm-studio",                  # Non-empty string key
-    model="qwen2.5-7b-instruct",          # Model ID running in LM Studio
+    base_url="http://localhost:1234/v1",
+    api_key="lm-studio",
+    model="qwen2.5-7b-instruct",
     temperature=0.1,
 )
-
 
 def _coerce_model(obj, model_class):
     if isinstance(obj, model_class):
@@ -54,15 +53,30 @@ async def planner_node(state: AgentState) -> AgentState:
     return {
         **state,
         "plan": plan,
-        "status": "planned",
+        "status": "planned",  # State used by Streamlit to trigger the edit UI
     }
+
+
+# NEW NODE: This node does nothing except act as a resume point after the human approves.
+async def human_review_node(state: AgentState) -> AgentState:
+    print("--- [NODE: HUMAN REVIEW] Plan approved, resuming workflow ---")
+    return {**state, "status": "approved"}
 
 
 async def retriever_node(state: AgentState) -> AgentState:
     print("--- [NODE: RETRIEVER] Fetching web sources ---")
-    plan = state.get("plan")
-    if not plan:
+    
+    # DEFENSIVE & SAFE: Unwrap state if it somehow arrives as a tuple
+    if isinstance(state, tuple):
+        state = state[0] if len(state) > 0 else {}
+        
+    raw_plan = state.get("plan")
+    if not raw_plan:
         return {**state, "sources": [], "status": "no_plan"}
+
+    # Ensure plan is a Pydantic object
+    from schemas import ResearchPlan
+    plan = _coerce_model(raw_plan, ResearchPlan)
 
     queries = (plan.questions or [plan.topic])[:4]
     sources = execute_web_search(queries, max_results_per_query=2, deep_scrape=True)
@@ -72,14 +86,16 @@ async def retriever_node(state: AgentState) -> AgentState:
         "sources": sources,
         "status": "retrieved",
     }
-
-
 async def synthesizer_node(state: AgentState) -> AgentState:
     print(f"--- [NODE: SYNTHESIZER] Writing draft (Attempt {state.get('retry_count', 0) + 1}) ---")
-    plan = state.get("plan")
+    raw_plan = state.get("plan")
     sources = state.get("sources", [])
-    if not plan:
+    if not raw_plan:
         return {**state, "draft": None, "status": "no_plan"}
+
+    # FIX: Ensure plan is a Pydantic object
+    from schemas import ResearchPlan
+    plan = _coerce_model(raw_plan, ResearchPlan)
 
     formatted_sources = []
     for idx, s in enumerate(sources[:5], 1):
@@ -119,7 +135,6 @@ async def synthesizer_node(state: AgentState) -> AgentState:
         "status": "drafted",
     }
 
-
 async def fact_checker_node(state: AgentState) -> AgentState:
     print("--- [NODE: FACT CHECKER] Verifying claims ---")
     draft = state.get("draft")
@@ -154,6 +169,16 @@ async def fact_checker_node(state: AgentState) -> AgentState:
     }
 
 
+# NEW: Router to decide if we should pause for human review
+def route_after_planner(state: AgentState) -> str:
+    if state.get("auto_approve"):
+        print("Auto-approve is enabled. Skipping human review.")
+        return "retriever"
+    
+    print("Auto-approve is disabled. Routing to human review (graph will pause).")
+    return "human_review"
+
+
 def route_after_fact_check(state: AgentState) -> str:
     retry_count = state.get("retry_count", 0)
     current_status = state.get("status", "verified")
@@ -161,7 +186,6 @@ def route_after_fact_check(state: AgentState) -> str:
     if current_status == "verified" or retry_count >= 1:
         print("Fact check passed or max retries reached. Finishing workflow.")
         return END
-
     print(f"Fact check failed with status '{current_status}'. Retrying synthesis...")
     return "synthesizer"
 
@@ -169,12 +193,21 @@ def route_after_fact_check(state: AgentState) -> str:
 # Define StateGraph
 workflow = StateGraph(AgentState)
 workflow.add_node("planner", planner_node)
+workflow.add_node("human_review", human_review_node)  # Add new node
 workflow.add_node("retriever", retriever_node)
 workflow.add_node("synthesizer", synthesizer_node)
 workflow.add_node("fact_checker", fact_checker_node)
 
 workflow.add_edge(START, "planner")
-workflow.add_edge("planner", "retriever")
+
+# Conditional routing after planner
+workflow.add_conditional_edges(
+    "planner", 
+    route_after_planner, 
+    {"retriever": "retriever", "human_review": "human_review"}
+)
+
+workflow.add_edge("human_review", "retriever")
 workflow.add_edge("retriever", "synthesizer")
 workflow.add_edge("synthesizer", "fact_checker")
 
@@ -187,8 +220,12 @@ workflow.add_conditional_edges(
     },
 )
 
-# Function to compile graph asynchronously within FastAPI context
+# Compile graph asynchronously within FastAPI context, setting the interrupt!
 def get_research_graph(checkpointer):
-    return workflow.compile(checkpointer=checkpointer)
+    # This pauses execution right before entering the 'human_review' node
+    return workflow.compile(
+        checkpointer=checkpointer, 
+        interrupt_before=["human_review"]
+    )
 
 __all__ = ["workflow", "get_research_graph", "AgentState"]

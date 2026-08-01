@@ -5,18 +5,16 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from graph import workflow, get_research_graph
 
-# Global reference for initialized graph
 research_graph = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global research_graph
-    # Connect asynchronously to SQLite database on startup
     async with AsyncSqliteSaver.from_conn_string("research_memory.db") as checkpointer:
         research_graph = get_research_graph(checkpointer)
         print("--- [DATABASE] AsyncSqliteSaver Checkpointer active ---")
@@ -24,12 +22,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Free AI Research Agent API",
-    description="Backend API powering the LangGraph multi-agent research workflow with persistent thread memory.",
-    version="3.0.0",
+    description="Backend API powering the LangGraph multi-agent research workflow.",
+    version="4.0.0",
     lifespan=lifespan,
 )
 
-# Enable CORS so Streamlit or external dashboards can communicate seamlessly
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,11 +35,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 class ResearchRequest(BaseModel):
     topic: Optional[str] = None
     query: Optional[str] = None
     thread_id: Optional[str] = None
+    auto_approve: bool = True
 
     def get_search_topic(self) -> str:
         search_term = self.topic or self.query
@@ -50,36 +47,46 @@ class ResearchRequest(BaseModel):
             raise ValueError("Research topic/query cannot be empty.")
         return search_term.strip()
 
-
-class ResearchResponse(BaseModel):
+class ResumeRequest(BaseModel):
     thread_id: str
-    topic: str
-    plan: Optional[Dict[str, Any]] = None
-    sources: List[Dict[str, Any]] = Field(default_factory=list)
-    draft: Optional[Dict[str, Any]] = None
-    fact_checks: List[Dict[str, Any]] = Field(default_factory=list)
-    status: str = "completed"
-
+    plan: Dict[str, Any]
 
 def _dump_object(obj: Any) -> Any:
-    if obj is None:
-        return None
-    if hasattr(obj, "model_dump"):
-        return obj.model_dump()
-    if hasattr(obj, "dict"):
-        return obj.dict()
-    if isinstance(obj, dict):
-        return obj
+    if obj is None: return None
+    if hasattr(obj, "model_dump"): return obj.model_dump()
+    if hasattr(obj, "dict"): return obj.dict()
+    if isinstance(obj, dict): return obj
     return str(obj)
-
 
 @app.get("/")
 def read_root():
-    return {
-        "status": "online",
-        "message": "AI Research Agent API is running with Async SQLite persistence.",
-    }
+    return {"status": "online", "message": "API running with HITL Support."}
 
+async def run_and_yield_events(input_state: Any, config: dict, thread_id: str):
+    try:
+        async for chunk in research_graph.astream(input_state, config=config, stream_mode="updates"):
+            for node_name, node_state in chunk.items():
+                
+                # SAFELY unwrap tuple if LangGraph mangles the state
+                if isinstance(node_state, tuple):
+                    node_state = node_state[0] if len(node_state) > 0 else {}
+                
+                if not isinstance(node_state, dict):
+                    continue
+
+                event_payload = {
+                    "thread_id": thread_id,
+                    "node": node_name,
+                    "status": node_state.get("status", "processing"),
+                    "plan": _dump_object(node_state.get("plan")),
+                    "sources": [_dump_object(s) for s in node_state.get("sources", [])],
+                    "draft": _dump_object(node_state.get("draft")),
+                    "fact_checks": [_dump_object(fc) for fc in node_state.get("fact_checks", [])],
+                }
+                yield f"data: {json.dumps(event_payload)}\n\n"
+    except Exception as e:
+        error_payload = {"thread_id": thread_id, "node": "error", "message": str(e)}
+        yield f"data: {json.dumps(error_payload)}\n\n"
 
 @app.post("/research/stream")
 async def stream_research(request: ResearchRequest):
@@ -94,6 +101,7 @@ async def stream_research(request: ResearchRequest):
     initial_state = {
         "topic": topic,
         "query": topic,
+        "auto_approve": request.auto_approve,
         "plan": None,
         "sources": [],
         "draft": None,
@@ -101,23 +109,15 @@ async def stream_research(request: ResearchRequest):
         "retry_count": 0,
         "status": "started",
     }
+    
+    return StreamingResponse(run_and_yield_events(initial_state, config, thread_id), media_type="text/event-stream")
 
-    async def event_generator():
-        try:
-            async for chunk in research_graph.astream(initial_state, config=config, stream_mode="updates"):
-                for node_name, node_state in chunk.items():
-                    event_payload = {
-                        "thread_id": thread_id,
-                        "node": node_name,
-                        "status": node_state.get("status", "processing"),
-                        "plan": _dump_object(node_state.get("plan")),
-                        "sources": [_dump_object(s) for s in node_state.get("sources", [])],
-                        "draft": _dump_object(node_state.get("draft")),
-                        "fact_checks": [_dump_object(fc) for fc in node_state.get("fact_checks", [])],
-                    }
-                    yield f"data: {json.dumps(event_payload)}\n\n"
-        except Exception as e:
-            error_payload = {"thread_id": thread_id, "node": "error", "message": str(e)}
-            yield f"data: {json.dumps(error_payload)}\n\n"
+@app.post("/research/resume")
+async def resume_research(request: ResumeRequest):
+    config = {"configurable": {"thread_id": request.thread_id}}
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    # FIX: Remove as_node="planner". 
+    # By omitting it, LangGraph seamlessly pushes the updated plan into the pending 'human_review' node!
+    await research_graph.aupdate_state(config, {"plan": request.plan})
+
+    return StreamingResponse(run_and_yield_events(None, config, request.thread_id), media_type="text/event-stream")

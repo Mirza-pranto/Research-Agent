@@ -5,24 +5,21 @@ import streamlit as st
 
 st.set_page_config(page_title="AI Research Workspace", layout="wide")
 
-# Initialize session state for multi-thread history
 if "sessions" not in st.session_state:
-    st.session_state.sessions = {}  # {thread_id: {"topic": ..., "data": ...}}
-
+    st.session_state.sessions = {}
 if "active_thread_id" not in st.session_state:
     st.session_state.active_thread_id = str(uuid.uuid4())
 
 active_thread = st.session_state.active_thread_id
 current_session_data = st.session_state.sessions.get(active_thread, {})
 
-# Sidebar Navigation for Research Sessions
 with st.sidebar:
     st.title("📚 Research History")
 
     if st.button("➕ New Research Session", use_container_width=True):
         st.session_state.active_thread_id = str(uuid.uuid4())
         st.rerun()
-
+    
     st.divider()
 
     if st.session_state.sessions:
@@ -30,65 +27,51 @@ with st.sidebar:
         for tid, sess in st.session_state.sessions.items():
             topic_label = sess.get("topic", "Untitled Session")
             truncated_label = topic_label[:26] + ("..." if len(topic_label) > 26 else "")
-
-            # Highlight currently active session
+            
             is_active = (tid == st.session_state.active_thread_id)
             btn_prefix = "🟢 " if is_active else "📄 "
 
             if st.button(f"{btn_prefix}{truncated_label}", key=f"btn_{tid}", use_container_width=True):
                 st.session_state.active_thread_id = tid
                 st.rerun()
-    else:
-        st.caption("No past sessions yet. Submit a research topic to start!")
 
-st.title("Free AI Research Agent Workspace 3.0")
-st.write("Submit a research prompt to run the local FastAPI workflow with real-time streaming and thread memory.")
 
-# Pre-fill input box if active session already has a topic
+st.title("Free AI Research Agent Workspace 4.0")
+st.write("Now with **Human-in-the-Loop (HITL)** Plan Approval!")
+
 default_prompt = current_session_data.get("topic", "")
-prompt = st.text_area("Research prompt", value=default_prompt, placeholder="Enter a topic or question...", key=f"prompt_{active_thread}")
+prompt = st.text_area("Research prompt", value=default_prompt, placeholder="Enter a topic...", key=f"prompt_{active_thread}")
 
-if st.button("Run research", key=f"run_{active_thread}") and prompt.strip():
-    status_box = st.status("🚀 Initializing research workflow...", expanded=True)
+# NEW: Toggle for auto-approving the plan
+auto_approve = st.toggle("Auto-approve research plan (Skip manual review)", value=True)
 
-    final_data = {
-        "topic": prompt.strip(),
-        "plan": None,
-        "sources": [],
-        "draft": None,
-        "fact_checks": [],
-        "status": "started",
-    }
-
+# Helper function to consume the SSE stream and update UI
+def consume_stream(url: str, payload: dict, final_data: dict, status_box):
+    has_error = False  # Track errors to prevent blind reruns
+    
     try:
-        url = "http://localhost:8000/research/stream"
-        payload = {
-            "topic": prompt.strip(),
-            "thread_id": active_thread,
-        }
-
         with httpx.stream("POST", url, json=payload, timeout=600.0) as response:
             response.raise_for_status()
 
             for line in response.iter_lines():
-                if not line or not line.startswith("data: "):
-                    continue
-
+                if not line or not line.startswith("data: "): continue
                 raw_json = line[6:].strip()
-                if not raw_json:
-                    continue
+                if not raw_json: continue
 
                 event = json.loads(raw_json)
                 node = event.get("node")
+                
+                # FIX: Universally update the status on every successful event
+                new_status = event.get("status")
+                if new_status and new_status != "processing":
+                    final_data["status"] = new_status
 
                 if node == "planner":
                     status_box.update(label="🧠 **Planner:** Research plan generated!", state="running")
                     final_data["plan"] = event.get("plan")
-                    if final_data["plan"]:
-                        with status_box:
-                            st.write("**Target Questions:**")
-                            for q in final_data["plan"].get("questions", []):
-                                st.write(f"- {q}")
+                    
+                elif node == "human_review":
+                    status_box.update(label="👍 **Human Review:** Plan approved, resuming...", state="running")
 
                 elif node == "retriever":
                     status_box.update(label="🌐 **Retriever:** Web sources collected!", state="running")
@@ -101,24 +84,91 @@ if st.button("Run research", key=f"run_{active_thread}") and prompt.strip():
                 elif node == "fact_checker":
                     status_box.update(label="✅ **Fact Checker:** Claim verification complete!", state="complete")
                     final_data["fact_checks"] = event.get("fact_checks", [])
-                    final_data["status"] = event.get("status", "completed")
 
                 elif node == "error":
                     status_box.update(label="❌ Error occurred in workflow", state="error")
                     st.error(f"Agent Error: {event.get('message')}")
-
+                    has_error = True
+                    
     except Exception as err:
         status_box.update(label="❌ Connection failed", state="error")
         st.error(f"Failed to connect to streaming backend: {err}")
+        has_error = True
+    
+    return final_data, has_error
 
-    # Store full research session in Streamlit state
+
+# PRIMARY RUN BUTTON
+if st.button("Run research", key=f"run_{active_thread}") and prompt.strip():
+    status_box = st.status("🚀 Initializing research workflow...", expanded=True)
+
+    final_data = {
+        "topic": prompt.strip(),
+        "plan": None,
+        "sources": [],
+        "draft": None,
+        "fact_checks": [],
+        "status": "started",
+    }
+    
+    payload = {
+        "topic": prompt.strip(),
+        "thread_id": active_thread,
+        "auto_approve": auto_approve
+    }
+
+    # Only stream the primary run here!
+    final_data, has_error = consume_stream("http://localhost:8000/research/stream", payload, final_data, status_box)
     st.session_state.sessions[active_thread] = final_data
-    current_session_data = final_data
+    
+    if not has_error:
+        st.rerun()
 
-# Render Active Session Results if present
+
+# ==========================================
+# INTERRUPT STATE UI: Plan Editing Form
+# ==========================================
+if current_session_data.get("status") == "planned":
+    st.warning("✋ **Graph Paused:** Please review and edit the research questions before scraping begins.")
+    
+    plan_dict = current_session_data.get("plan", {})
+    questions = plan_dict.get("questions", [])
+    
+    with st.form(key=f"approve_form_{active_thread}"):
+        st.write("Edit, add, or delete questions below (one per line):")
+        
+        # Display questions as text block for easy editing
+        questions_text = "\n".join(questions)
+        edited_qs_text = st.text_area("Target Search Questions", value=questions_text, height=150)
+        
+        if st.form_submit_button("Approve & Resume Search", type="primary"):
+            # Update the plan locally
+            edited_questions = [q.strip() for q in edited_qs_text.split("\n") if q.strip()]
+            plan_dict["questions"] = edited_questions
+            current_session_data["plan"] = plan_dict
+            
+            status_box = st.status("▶️ Resuming workflow...", expanded=True)
+            
+            # Hit the Resume API endpoint
+            payload = {
+                "thread_id": active_thread,
+                "plan": plan_dict
+            }
+            
+            # Resume consuming the stream - Unpacking correctly applied here!
+            current_session_data, has_error = consume_stream("http://localhost:8000/research/resume", payload, current_session_data, status_box)
+            st.session_state.sessions[active_thread] = current_session_data
+            
+            if not has_error:
+                st.rerun()
+
+
+# ==========================================
+# COMPLETED STATE UI: Final Report
+# ==========================================
 if current_session_data and current_session_data.get("status") in ["completed", "verified", "drafted"]:
     st.divider()
-
+    
     st.subheader("Summary")
     draft = current_session_data.get("draft") or {}
     st.write(draft.get("summary") or "No summary available yet.")
@@ -138,8 +188,6 @@ if current_session_data and current_session_data.get("status") in ["completed", 
             claim = check.get("claim") or check.get("details") or "N/A"
             status_val = check.get("status") or "unknown"
             st.write(f"- {claim}: **{status_val}**")
-    else:
-        st.info("No fact-check results available.")
 
     st.subheader("Revision count / Status")
     st.write(current_session_data.get("status") or "unknown")
@@ -157,5 +205,3 @@ if current_session_data and current_session_data.get("status") in ["completed", 
                 st.markdown(f"- {title}")
             if snippet:
                 st.caption(snippet[:300] + "..." if len(snippet) > 300 else snippet)
-    else:
-        st.info("No sources returned.")
